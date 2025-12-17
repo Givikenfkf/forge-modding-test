@@ -1,0 +1,123 @@
+name: Build & (optional) deploy HTML site
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+    inputs:
+      java-version:
+        description: 'Java version to install (Temurin)'
+        required: false
+        default: '17'
+      deploy:
+        description: 'Set to "true" to push the built site to gh-pages (optional)'
+        required: false
+        default: 'false'
+      output-dir:
+        description: 'If you know the built site dir (e.g. dist or out), set it here'
+        required: false
+        default: ''
+
+jobs:
+  build-on-windows:
+    name: Build on Windows (runs .bat if present)
+    runs-on: windows-latest
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Java (Temurin)
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: ${{ github.event.inputs.java-version || '17' }}
+
+      - name: Set up Node (used only if repo has package.json)
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+
+      - name: Locate first .bat (if any) and export path
+        id: find-bat
+        shell: pwsh
+        run: |
+          $bat = Get-ChildItem -Path $PWD -Filter *.bat -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+          if ($bat) {
+            Write-Host "Found .bat: $($bat.FullName)"
+            Add-Content -Path $env:GITHUB_ENV -Value "BAT_PATH=$($bat.FullName)"
+          } else {
+            Write-Host "No .bat file found in repository."
+          }
+
+      - name: Run build script (BAT / gradle / npm fallback)
+        shell: pwsh
+        run: |
+          if ($env:BAT_PATH) {
+            Write-Host "Running BAT: $env:BAT_PATH"
+            & "$env:BAT_PATH"
+          } elseif (Test-Path ./gradlew.bat) {
+            Write-Host "Running ./gradlew.bat build"
+            ./gradlew.bat build
+          } elseif (Test-Path ./gradlew) {
+            Write-Host "Running ./gradlew build"
+            ./gradlew build
+          } elseif (Test-Path package.json) {
+            Write-Host "No .bat/gradle found — using npm build (if script exists)"
+            npm ci
+            $pkg = Get-Content package.json | Out-String
+            if ($pkg -match '"build"') { npm run build } else { Write-Host 'No build script in package.json' }
+          } else {
+            Write-Host "No recognized build entrypoint found. If your repo requires a specific command, edit the workflow to run it."
+          }
+
+      - name: Try to locate output directory or HTML files
+        id: find-output
+        shell: pwsh
+        run: |
+          $explicit = '${{ github.event.inputs.output-dir }}'
+          if ($explicit -and $explicit -ne '') {
+            if (Test-Path $explicit) { Add-Content -Path $env:GITHUB_ENV -Value "OUTPUT_DIR=$explicit"; Write-Host "Using explicit OUTPUT_DIR: $explicit"; exit 0 }
+            Write-Host "Explicit OUTPUT_DIR provided but path not found: $explicit"
+          }
+
+          $candidates = @('dist','out','build','build/libs','build/distributions','web','release','public','site','docs')
+          $found = $null
+          foreach ($d in $candidates) { if (Test-Path $d) { $found = $d; break } }
+
+          if (-not $found) {
+            $html = Get-ChildItem -Path $PWD -Filter *.html -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($html) { $found = Split-Path $html.FullName -Parent }
+          }
+
+          if ($found) {
+            Write-Host "Found output directory: $found"
+            Add-Content -Path $env:GITHUB_ENV -Value "OUTPUT_DIR=$found"
+          } else {
+            Write-Host "##[warning] No common output directory or HTML files detected. You may need to set the workflow input 'output-dir' or edit the workflow to point to the correct folder."
+          }
+
+      - name: Upload built site as artifact
+        if: env.OUTPUT_DIR != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: eaglercraft-html-site
+          path: ${{ env.OUTPUT_DIR }}
+
+      - name: Deploy to GitHub Pages (optional)
+        if: ${{ github.event.inputs.deploy == 'true' && env.OUTPUT_DIR != '' }}
+        uses: peaceiris/actions-gh-pages@v3
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ${{ env.OUTPUT_DIR }}
+
+      - name: Final notes
+        if: always()
+        shell: pwsh
+        run: |
+          if (-not $env:OUTPUT_DIR) { Write-Host "No OUTPUT_DIR detected; check the build output and set the 'output-dir' input for workflow_dispatch or edit the workflow." }
+          else { Write-Host "Built site available at: $env:OUTPUT_DIR (artifact uploaded and optionally deployed)." }
