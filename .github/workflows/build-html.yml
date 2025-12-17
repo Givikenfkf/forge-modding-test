@@ -108,21 +108,6 @@ jobs:
           name: eaglercraft-html-site
           path: ${{ env.OUTPUT_DIR }}
 
-      - name: Commit built HTML back into repo (auto)
-        if: env.OUTPUT_DIR != ''
-        shell: pwsh
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-
-          if (-not (Test-Path built-html)) { New-Item -ItemType Directory -Path built-html | Out-Null }
-
-          Copy-Item -Path "$env:OUTPUT_DIR\*" -Destination built-html -Recurse -Force
-
-          git add built-html
-          git commit -m "Auto-build: update compiled HTML" || echo "No changes to commit"
-          git push
-
       - name: Deploy to GitHub Pages (optional)
         if: ${{ github.event.inputs.deploy == 'true' && env.OUTPUT_DIR != '' }}
         uses: peaceiris/actions-gh-pages@v3
